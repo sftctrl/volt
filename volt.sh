@@ -1,118 +1,167 @@
 #!/bin/bash
 
 # ==============================================================================
-# volt.sh - Um Gerenciador de Energia Deliberado
+# volt.sh - v2.0 - Um Gerenciador de Energia Deliberado
 # Autor: Lucas Bastos Barboza
-# Filosofia: Vontade sobre o algoritmo. Controle manual e consciente
-#            sobre a gestão de energia do hardware.
+# Filosofia: Vontade sobre o algoritmo. Controle direto e consciente
+#            sobre os arquivos de sistema do hardware.
 # ==============================================================================
 
 # --- Variáveis de Configuração ---
-# O kernel do Linux expõe o controle do modo de conservação da bateria
-# para notebooks Lenovo/IdeaPad neste arquivo.
-# É uma interface direta, sem necessidade de daemons ou software complexo.
 CONSERVATION_MODE_FILE="/sys/devices/pci0000:00/0000:00:14.3/PNP0C09:00/VPC2004:00/conservation_mode"
+CPU_GOVERNOR_PATH="/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+BRIGHTNESS_FILE="/sys/class/backlight/amdgpu_bl1/brightness"
+MAX_BRIGHTNESS_FILE="/sys/class/backlight/amdgpu_bl1/max_brightness"
+CURRENT_PROFILE_FILE="/tmp/volt_current_profile"
 
-# Carrega as configurações de ícones e cores para a Polybar
-# Isso separa a lógica da apresentação, um princípio de bom design.
-source "$(dirname "$0")/config.sh"
+# --- Bloco para encontrar o caminho real do script ---
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" &> /dev/null && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" &> /dev/null && pwd )"
+# ----------------------------------------------------
 
-# --- Funções ---
+source "$SCRIPT_DIR/config.sh"
 
-# Função para verificar se o script está sendo executado como root
-# A modificação do arquivo de sistema exige privilégios elevados.
+# --- Funções de Sistema ---
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo "Erro: Este script precisa ser executado como root (sudo) para alterar as configurações."
+        echo "Erro: Este script precisa ser executado como root (sudo)."
         exit 1
     fi
 }
 
-# Função para definir o estado do modo de conservação
-# Parâmetro: $1 - deve ser 0 (desligado) ou 1 (ligado)
+# --- Funções de Controle Direto ---
 set_conservation_mode() {
-    local mode=$1
-    if [ ! -w "$CONSERVATION_MODE_FILE" ]; then
-        echo "Erro: Não é possível escrever no arquivo '$CONSERVATION_MODE_FILE'."
-        echo "Verifique se o módulo 'ideapad_laptop' está carregado e se você tem as permissões corretas."
-        exit 1
-    fi
-
-    # Escreve o valor no arquivo do kernel, efetivamente mudando o modo.
-    # Esta é a ação central, a "vontade" sendo aplicada diretamente. [cite: 8]
-    echo "$mode" > "$CONSERVATION_MODE_FILE"
+    echo "$1" > "$CONSERVATION_MODE_FILE"
 }
 
-# Função para obter o status atual e formatar para a Polybar
-get_polybar_status() {
-    if [ ! -f "$CONSERVATION_MODE_FILE" ]; then
-        echo -e "${ICON_ERROR} Driver não encontrado"
-        exit 1
-    fi
+set_cpu_governor() {
+    local governor=$1
+    # Abordagem robusta: Itera sobre cada núcleo e aplica a configuração.
+    for cpu_gov_file in $CPU_GOVERNOR_PATH; do
+        # O '|| true' garante que o script não pare se um núcleo falhar.
+        echo "$governor" > "$cpu_gov_file" || true
+    done
+}
 
-    current_mode=$(cat "$CONSERVATION_MODE_FILE")
-
-    if [ "$current_mode" -eq 1 ]; then
-        # Modo de Conservação ATIVADO: A bateria não passará de 60%.
-        # A cor e o ícone refletem um estado de "proteção" ou "limite".
-        echo -e "%{F${COLOR_ON}}${ICON_ON}%{F-} Carga Limitada"
-    else
-        # Modo de Conservação DESATIVADO: A bateria carregará até 100%.
-        # A cor e o ícone refletem um estado de "plena potência" ou "liberdade".
-        echo -e "%{F${COLOR_OFF}}${ICON_OFF}%{F-} Carga Máxima"
+set_brightness_percent() {
+    local percent=$1
+    if [ -f "$MAX_BRIGHTNESS_FILE" ] && [ -f "$BRIGHTNESS_FILE" ]; then
+        local max_brightness
+        max_brightness=$(cat "$MAX_BRIGHTNESS_FILE")
+        # Calcula o valor do brilho com base na porcentagem
+        local new_brightness
+        new_brightness=$(( max_brightness * percent / 100 ))
+        echo "$new_brightness" > "$BRIGHTNESS_FILE"
     fi
 }
 
-# Função para mostrar o status no terminal de forma legível
+# --- Funções de Perfil ---
+set_economico() {
+    echo "Aplicando perfil 'Economico'..."
+    set_cpu_governor "powersave"
+    set_conservation_mode 0
+    set_brightness_percent 30 # Define o brilho para 30%
+    echo "Economico" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
+}
+
+set_normal() {
+    echo "Aplicando perfil 'Normal'..."
+    # Tenta usar 'schedutil', se falhar (não existir), usa 'ondemand' como fallback.
+    set_cpu_governor "schedutil"
+    if ! grep -q "schedutil" "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"; then
+      set_cpu_governor "ondemand"
+    fi
+    set_conservation_mode 1
+    # Não mexe no brilho, respeita a escolha do usuário.
+    echo "Normal" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
+}
+
+set_desempenho() {
+    echo "Aplicando perfil 'Desempenho'..."
+    set_cpu_governor "performance"
+    set_conservation_mode 0
+    # Não mexe no brilho, respeita a escolha do usuário.
+    echo "Desempenho" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
+}
+
+# --- Funções de Status e Display ---
 print_terminal_status() {
-    if [ ! -f "$CONSERVATION_MODE_FILE" ]; then
-        echo "Erro: Driver 'ideapad_acpi' não parece estar ativo."
-        exit 1
-    fi
-
-    current_mode=$(cat "$CONSERVATION_MODE_FILE")
+    battery_status=$(cat "$CONSERVATION_MODE_FILE")
+    profile_status=$(cat "$CURRENT_PROFILE_FILE" 2>/dev/null || echo "Nenhum")
+    cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+    brightness_val=$(cat "$BRIGHTNESS_FILE")
+    max_brightness_val=$(cat "$MAX_BRIGHTNESS_FILE")
+    brightness_percent=$(( brightness_val * 100 / max_brightness_val ))
 
     echo "---------------------------------"
-    echo "  Status do Gerenciador de Energia (volt.sh)"
+    echo "  Status do Gerenciador (volt.sh)"
     echo "---------------------------------"
-    if [ "$current_mode" -eq 1 ]; then
-        echo "  Modo Atual: CONSERVAÇÃO (Carga limitada a ~60%)"
-        echo "  Ação: A bateria está protegida contra desgaste."
+    if [ "$battery_status" -eq 1 ]; then
+        echo "  Bateria: CONSERVAÇÃO (Carga limitada)"
     else
-        echo "  Modo Atual: CARGA MÁXIMA (Carga habilitada até 100%)"
-        echo "  Ação: Ideal para uso fora da tomada."
+        echo "  Bateria: CARGA MÁXIMA (100%)"
     fi
+    echo "  Brilho:  $brightness_percent%"
+    echo "  CPU Gov: $cpu_gov"
+    echo "  Perfil:  $profile_status"
     echo "---------------------------------"
+}
+
+get_polybar_status() {
+    if [ ! -f "$CURRENT_PROFILE_FILE" ]; then
+        echo "Normal" > "$CURRENT_PROFILE_FILE"
+        chmod 666 "$CURRENT_PROFILE_FILE"
+    fi
+
+    current_profile=$(cat "$CURRENT_PROFILE_FILE")
+    case "$current_profile" in
+        "Economico")
+            polybar_profile="%{F#${COLOR_PERFIL_ECO}}${ICON_PERFIL_ECO}%{F-} $current_profile"
+            ;;
+        "Normal")
+            polybar_profile="%{F#${COLOR_PERFIL_NORMAL}}${ICON_PERFIL_NORMAL}%{F-} $current_profile"
+            ;;
+        "Desempenho")
+            polybar_profile="%{F#${COLOR_PERFIL_PERFORMANCE}}${ICON_PERFIL_PERFORMANCE}%{F-} $current_profile"
+            ;;
+    esac
+
+    current_battery_mode=$(cat "$CONSERVATION_MODE_FILE")
+    if [ "$current_battery_mode" -eq 1 ]; then
+        polybar_battery="%{F#${COLOR_BAT_CONSERVE}}${ICON_BAT_CONSERVE}%{F-}"
+    else
+        polybar_battery="%{F#${COLOR_BAT_MAX}}${ICON_BAT_MAX}%{F-}"
+    fi
+
+    echo "$polybar_profile  $polybar_battery"
 }
 
 # --- Lógica Principal ---
-# Analisa os argumentos passados para o script.
-# Um simples 'case' é mais limpo e eficiente do que múltiplos 'if/elifs'.
 case "$1" in
-    --on)
-        check_root
-        echo "Ativando o Modo de Conservação de Energia..."
-        set_conservation_mode 1
-        echo "Concluído. A bateria não carregará acima de 60%."
-        ;;
-    --off)
-        check_root
-        echo "Desativando o Modo de Conservação de Energia..."
-        set_conservation_mode 0
-        echo "Concluído. A bateria agora pode carregar até 100%."
-        ;;
-    --status)
-        print_terminal_status
-        ;;
-    --polybar)
-        get_polybar_status
-        ;;
+    --economico)  check_root; set_economico; echo "Perfil 'Economico' ativado.";;
+    --normal)     check_root; set_normal; echo "Perfil 'Normal' ativado.";;
+    --desempenho) check_root; set_desempenho; echo "Perfil 'Desempenho' ativado.";;
+    --on)  check_root; set_conservation_mode 1; echo "Modo de Conservação ATIVADO.";;
+    --off) check_root; set_conservation_mode 0; echo "Modo de Conservação DESATIVADO.";;
+    --status)  print_terminal_status;;
+    --polybar) get_polybar_status;;
     *)
-        echo "Uso: $0 [--on | --off | --status | --polybar]"
-        echo "  --on      : Liga o modo de conservação (limita a carga em 60%). Requer sudo."
-        echo "  --off     : Desliga o modo de conservação (permite carga total). Requer sudo."
-        echo "  --status  : Mostra o status atual no terminal."
-        echo "  --polybar : Saída formatada para o módulo da Polybar."
+        echo "Uso: $0 [opção]"
+        echo "Opções de Perfil:"
+        echo "  --economico   Define o perfil de economia de energia (CPU powersave, brilho baixo)."
+        echo "  --normal      Define o perfil de uso geral (CPU ondemand/schedutil, bateria em conservação)."
+        echo "  --desempenho  Define o perfil de máxima performance (CPU performance)."
+        echo "Opções de Bateria:"
+        echo "  --on          Ativa a limitação de carga (~60%) independentemente do perfil."
+        echo "  --off         Desativa a limitação de carga (permite 100%) independentemente do perfil."
+        echo "Opções de Display:"
+        echo "  --status      Mostra o status atual no terminal."
+        echo "  --polybar     Gera a saída para a Polybar."
         exit 1
         ;;
 esac
