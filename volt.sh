@@ -11,7 +11,7 @@
 # O kernel do Linux expõe o controle do modo de conservação da bateria
 # para notebooks Lenovo/IdeaPad neste arquivo.
 # É uma interface direta, sem necessidade de daemons ou software complexo.
-CONSERVATION_MODE_FILE="/sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode"
+CONSERVATION_MODE_FILE="/sys/devices/pci0000:00/0000:00:14.3/PNP0C09:00/VPC2004:00/conservation_mode"
 
 # Carrega as configurações de ícones e cores para a Polybar
 # Isso separa a lógica da apresentação, um princípio de bom design.
