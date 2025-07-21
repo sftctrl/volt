@@ -1,0 +1,3 @@
+# Ignorar arquivos de log ou status temporários
+*.log
+status.tmp
