@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# volt.sh - v3.0 - Um Gerenciador de Energia Deliberado
+# volt.sh - v3.1 - Um Gerenciador de Energia Deliberado
 # Autor: Lucas Bastos Barboza
-# Filosofia: Vontade sobre o algoritmo. Controle direto e consciente
-#            sobre os arquivos de sistema do hardware.
+# Filosofia: Vontade sobre o algoritmo. Controle direto, consciente e
+#            não destrutivo sobre os arquivos de sistema do hardware.
 # ==============================================================================
 
 # --- Variáveis de Configuração ---
@@ -13,7 +13,10 @@ CPU_GOVERNOR_PATH="/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
 AVAILABLE_GOVERNORS_FILE="/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"
 BRIGHTNESS_FILE="/sys/class/backlight/amdgpu_bl1/brightness"
 MAX_BRIGHTNESS_FILE="/sys/class/backlight/amdgpu_bl1/max_brightness"
+
+# Arquivos de estado temporários
 CURRENT_PROFILE_FILE="/tmp/volt_current_profile"
+LAST_BRIGHTNESS_FILE="/tmp/volt_last_brightness" # Arquivo para guardar o brilho anterior
 
 # --- Bloco para encontrar o caminho real do script ---
 SOURCE="${BASH_SOURCE[0]}"
@@ -42,22 +45,13 @@ set_conservation_mode() {
 
 set_cpu_governor() {
     local governor=$1
-    # Abordagem robusta: Itera sobre cada núcleo e aplica a configuração.
     for cpu_gov_file in $CPU_GOVERNOR_PATH; do
-        # O '|| true' garante que o script não pare se um núcleo falhar.
         echo "$governor" > "$cpu_gov_file" || true
     done
 }
 
-set_brightness_percent() {
-    local percent=$1
-    if [ -f "$MAX_BRIGHTNESS_FILE" ] && [ -f "$BRIGHTNESS_FILE" ]; then
-        local max_brightness
-        max_brightness=$(cat "$MAX_BRIGHTNESS_FILE")
-        local new_brightness
-        new_brightness=$(( max_brightness * percent / 100 ))
-        echo "$new_brightness" > "$BRIGHTNESS_FILE"
-    fi
+set_brightness_value() {
+    echo "$1" > "$BRIGHTNESS_FILE"
 }
 
 # --- Funções de Perfil ---
@@ -65,16 +59,37 @@ set_economico() {
     echo "Aplicando perfil 'Economico'..."
     set_cpu_governor "powersave"
     set_conservation_mode 0
-    set_brightness_percent 30
+
+    # LÓGICA APRIMORADA: Salva o brilho atual antes de alterá-lo.
+    if [ -f "$BRIGHTNESS_FILE" ]; then
+        cat "$BRIGHTNESS_FILE" > "$LAST_BRIGHTNESS_FILE" && chmod 666 "$LAST_BRIGHTNESS_FILE"
+    fi
+    
+    # Calcula e define o brilho para 30%
+    local max_brightness
+    max_brightness=$(cat "$MAX_BRIGHTNESS_FILE")
+    local new_brightness
+    new_brightness=$(( max_brightness * 30 / 100 ))
+    set_brightness_value "$new_brightness"
+    
     echo "Economico" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
+}
+
+restore_brightness() {
+    # Função auxiliar para restaurar o brilho a partir do arquivo salvo.
+    if [ -f "$LAST_BRIGHTNESS_FILE" ]; then
+        last_brightness=$(cat "$LAST_BRIGHTNESS_FILE")
+        set_brightness_value "$last_brightness"
+    fi
 }
 
 set_normal() {
     echo "Aplicando perfil 'Normal'..."
-    # LÓGICA INTELIGENTE: Verifica qual governador usar
-    if grep -q "schedutil" "$AVAILABLE_GOVERNORS_FILE"; then
+    restore_brightness # Restaura o brilho salvo
+
+    if [ -f "$AVAILABLE_GOVERNORS_FILE" ] && grep -q "schedutil" "$AVAILABLE_GOVERNORS_FILE"; then
         set_cpu_governor "schedutil"
-    elif grep -q "ondemand" "$AVAILABLE_GOVERNORS_FILE"; then
+    elif [ -f "$AVAILABLE_GOVERNORS_FILE" ] && grep -q "ondemand" "$AVAILABLE_GOVERNORS_FILE"; then
         set_cpu_governor "ondemand"
     fi
     set_conservation_mode 1
@@ -83,10 +98,13 @@ set_normal() {
 
 set_desempenho() {
     echo "Aplicando perfil 'Desempenho'..."
+    restore_brightness # Restaura o brilho salvo
+
     set_cpu_governor "performance"
     set_conservation_mode 0
     echo "Desempenho" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
 }
+
 
 # --- Funções de Status e Display ---
 print_terminal_status() {
