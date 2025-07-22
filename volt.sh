@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# volt.sh - v2.0 - Um Gerenciador de Energia Deliberado
+# volt.sh - v3.0 - Um Gerenciador de Energia Deliberado
 # Autor: Lucas Bastos Barboza
 # Filosofia: Vontade sobre o algoritmo. Controle direto e consciente
 #            sobre os arquivos de sistema do hardware.
@@ -10,6 +10,7 @@
 # --- Variáveis de Configuração ---
 CONSERVATION_MODE_FILE="/sys/devices/pci0000:00/0000:00:14.3/PNP0C09:00/VPC2004:00/conservation_mode"
 CPU_GOVERNOR_PATH="/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+AVAILABLE_GOVERNORS_FILE="/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"
 BRIGHTNESS_FILE="/sys/class/backlight/amdgpu_bl1/brightness"
 MAX_BRIGHTNESS_FILE="/sys/class/backlight/amdgpu_bl1/max_brightness"
 CURRENT_PROFILE_FILE="/tmp/volt_current_profile"
@@ -53,7 +54,6 @@ set_brightness_percent() {
     if [ -f "$MAX_BRIGHTNESS_FILE" ] && [ -f "$BRIGHTNESS_FILE" ]; then
         local max_brightness
         max_brightness=$(cat "$MAX_BRIGHTNESS_FILE")
-        # Calcula o valor do brilho com base na porcentagem
         local new_brightness
         new_brightness=$(( max_brightness * percent / 100 ))
         echo "$new_brightness" > "$BRIGHTNESS_FILE"
@@ -65,19 +65,19 @@ set_economico() {
     echo "Aplicando perfil 'Economico'..."
     set_cpu_governor "powersave"
     set_conservation_mode 0
-    set_brightness_percent 30 # Define o brilho para 30%
+    set_brightness_percent 30
     echo "Economico" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
 }
 
 set_normal() {
     echo "Aplicando perfil 'Normal'..."
-    # Tenta usar 'schedutil', se falhar (não existir), usa 'ondemand' como fallback.
-    set_cpu_governor "schedutil"
-    if ! grep -q "schedutil" "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"; then
-      set_cpu_governor "ondemand"
+    # LÓGICA INTELIGENTE: Verifica qual governador usar
+    if grep -q "schedutil" "$AVAILABLE_GOVERNORS_FILE"; then
+        set_cpu_governor "schedutil"
+    elif grep -q "ondemand" "$AVAILABLE_GOVERNORS_FILE"; then
+        set_cpu_governor "ondemand"
     fi
     set_conservation_mode 1
-    # Não mexe no brilho, respeita a escolha do usuário.
     echo "Normal" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
 }
 
@@ -85,7 +85,6 @@ set_desempenho() {
     echo "Aplicando perfil 'Desempenho'..."
     set_cpu_governor "performance"
     set_conservation_mode 0
-    # Não mexe no brilho, respeita a escolha do usuário.
     echo "Desempenho" > "$CURRENT_PROFILE_FILE" && chmod 666 "$CURRENT_PROFILE_FILE"
 }
 
